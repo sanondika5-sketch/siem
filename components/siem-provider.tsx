@@ -1,7 +1,7 @@
 "use client"
 
 import { createContext, useCallback, useContext, useMemo, useState, useEffect, type ReactNode } from "react"
-import { MOCK_ALERTS, MOCK_EVENTS, generateSingleEvent, generateRandomAlert } from "@/lib/mock-data"
+import { MOCK_ALERTS, MOCK_EVENTS, generateSingleEvent } from "@/lib/mock-data"
 import type { Alert, AlertStatus, SecurityEvent } from "@/lib/types"
 
 interface SiemContextValue {
@@ -17,61 +17,88 @@ const SiemContext = createContext<SiemContextValue | null>(null)
 export function SiemProvider({ children }: { children: ReactNode }) {
   const [mounted, setMounted] = useState(false)
 
-  // Events are dynamic mock data; alerts are mutable session state.
-  const [events, setEvents] = useState<SecurityEvent[]>(MOCK_EVENTS)
-  const [alerts, setAlerts] = useState<Alert[]>(MOCK_ALERTS)
+  // Events and alerts are synced with the database
+  const [events, setEvents] = useState<SecurityEvent[]>([])
+  const [alerts, setAlerts] = useState<Alert[]>([])
 
   useEffect(() => {
     setMounted(true)
   }, [])
 
-  // Real-time background simulator
+  // 1. Poll the database API every 5 seconds to get latest live data
   useEffect(() => {
     if (!mounted) return
 
-    let tickCount = 0
-    const interval = setInterval(() => {
-      // 1. Generate a new security event
-      const newEvent = generateSingleEvent(tickCount++)
-      setEvents((prev) => [newEvent, ...prev])
-
-      // 2. Periodically trigger a new alert (every 6 ticks / 60 seconds with a 50% chance)
-      if (tickCount % 6 === 0 && Math.random() < 0.5) {
-        setEvents((currentEvents) => {
-          const related = currentEvents.slice(0, 3)
-          const newAlert = generateRandomAlert(related)
-          setAlerts((prevAlerts) => [newAlert, ...prevAlerts])
-          return currentEvents
-        })
+    const syncWithDatabase = async () => {
+      try {
+        const res = await fetch("/api/events")
+        if (res.ok) {
+          const data = await res.json()
+          setEvents(data.events || [])
+          setAlerts(data.alerts || [])
+        }
+      } catch (error) {
+        console.error("Failed to sync SIEM data with database:", error)
       }
-    }, 10000) // every 10 seconds
+    }
+
+    // Initial sync
+    syncWithDatabase()
+
+    const interval = setInterval(syncWithDatabase, 5000)
+    return () => clearInterval(interval)
+  }, [mounted])
+
+  // 2. Simulated log injector: pushes mock logs to the server to simulate activity
+  useEffect(() => {
+    if (!mounted) return
+
+    let tick = 0
+    const interval = setInterval(() => {
+      const mockEvent = generateSingleEvent(tick++)
+      
+      fetch("/api/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mockEvent),
+      }).catch((err) => console.error("Simulated injector push failed:", err))
+    }, 15000) // Inject a simulated event every 15 seconds
 
     return () => clearInterval(interval)
   }, [mounted])
 
+  // 3. Update alert status on client and save to database
   const setAlertStatus = useCallback((id: string, status: AlertStatus) => {
     setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, status } : a)))
+
+    fetch("/api/alerts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "status", alertId: id, status }),
+    }).catch((err) => console.error("Failed to save alert status update:", err))
   }, [])
 
+  // 4. Add notes on client and save to database
   const addNote = useCallback((id: string, text: string) => {
+    const noteId = `note-${Date.now()}`
+    const timestamp = new Date().toISOString()
+
     setAlerts((prev) =>
       prev.map((a) =>
         a.id === id
           ? {
               ...a,
-              notes: [
-                ...a.notes,
-                {
-                  id: `note-${Date.now()}`,
-                  author: "You",
-                  timestamp: new Date().toISOString(),
-                  text,
-                },
-              ],
+              notes: [...a.notes, { id: noteId, author: "You", timestamp, text }],
             }
           : a,
       ),
     )
+
+    fetch("/api/alerts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "note", alertId: id, noteText: text }),
+    }).catch((err) => console.error("Failed to save alert note:", err))
   }, [])
 
   const eventMap = useMemo(() => new Map(events.map((e) => [e.id, e])), [events])
